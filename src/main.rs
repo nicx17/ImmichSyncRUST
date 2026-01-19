@@ -224,11 +224,11 @@ async fn upload_asset(client: &Client, path: &Path, base_url: &str, key: &str) -
         let json: AssetResponse = resp.json().await?;
         Ok(Some(json.id))
     } else if status == StatusCode::OK {
-        warn!("⚠️  File exists (Deduplicated): {}", filename);
+        warn!("File exists (Deduplicated): {}", filename);
         let json: AssetResponse = resp.json().await?;
         Ok(Some(json.id))
     } else if status == StatusCode::CONFLICT {
-        warn!("⚠️  Duplicate rejected: {}", filename);
+        warn!("Duplicate rejected: {}", filename);
         // Try to parse ID from error body if possible, otherwise return generic flag
         match resp.json::<AssetResponse>().await {
             Ok(json) => Ok(Some(json.id)),
@@ -236,7 +236,7 @@ async fn upload_asset(client: &Client, path: &Path, base_url: &str, key: &str) -
         }
     } else {
         let error_text = resp.text().await?;
-        error!("❌ Upload failed for {}: Status {} - {}", filename, status, error_text);
+        error!("Upload failed for {}: Status {} - {}", filename, status, error_text);
         Ok(None)
     }
 }
