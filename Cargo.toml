@@ -1,0 +1,16 @@
+[package]
+name = "immich_sync"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] } # Async runtime
+reqwest = { version = "0.11", features = ["json", "multipart", "stream"] } # HTTP Client
+serde = { version = "1", features = ["derive"] } # Serialization
+serde_json = "1" # JSON handling
+dotenvy = "0.15" # .env file loading
+chrono = { version = "0.4", features = ["serde"] } # Date & Time
+anyhow = "1.0" # Easy error handling
+log = "0.4" # Logging facade
+simplelog = "0.12" # Logging implementation (File + Console)
+mime_guess = "2.0" # Automatically detect mime type (png/jpg)
