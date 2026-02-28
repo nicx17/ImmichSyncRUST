@@ -9,7 +9,10 @@ use std::collections::HashSet;
 use std::env;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
 // --- CONFIGURATION STRUCTS ---
 #[derive(Deserialize)]
@@ -103,7 +106,14 @@ async fn main() -> Result<()> {
     // Sort by modification time (Oldest first)
     entries.sort_by_key(|p| p.metadata().ok().and_then(|m| m.modified().ok()).unwrap_or(SystemTime::UNIX_EPOCH));
 
-    let mut count = 0;
+    let client_arc = client.clone();
+    let base_url_arc = Arc::new(base_url);
+    let api_key_arc = Arc::new(api_key);
+    
+    // Concurrency control: max 5 parallel uploads
+    let semaphore = Arc::new(Semaphore::new(5));
+    let mut join_set = JoinSet::new();
+
     for file_path in entries {
         let filename = file_path.file_name().unwrap().to_string_lossy().to_string();
 
@@ -111,25 +121,55 @@ async fn main() -> Result<()> {
             continue;
         }
 
-        info!("Uploading: {}...", filename);
-        match upload_asset(&client, &file_path, &base_url, &api_key).await {
-            Ok(Some(asset_id)) => {
+        let permit = semaphore.clone().acquire_owned().await.unwrap();
+        let client_c = client_arc.clone();
+        let base_url_c = base_url_arc.clone();
+        let api_key_c = api_key_arc.clone();
+        let file_path_c = file_path.clone();
+
+        join_set.spawn(async move {
+            info!("Uploading: {}...", filename);
+            let result = upload_asset(&client_c, &file_path_c, &base_url_c, &api_key_c).await;
+            drop(permit);
+            (filename, result)
+        });
+    }
+
+    let mut successful_asset_ids = Vec::new();
+    let mut uploaded_count = 0;
+
+    while let Some(res) = join_set.join_next().await {
+        match res {
+            Ok((filename, Ok(Some(asset_id)))) => {
                 if asset_id != "DUPLICATE_UNKNOWN_ID" {
-                    if let Err(e) = add_to_album(&client, &base_url, &api_key, &album_id, &asset_id).await {
-                        error!("Failed to link to album: {:?}", e);
-                    }
+                    successful_asset_ids.push(asset_id);
                 }
-                history.insert(filename.clone());
-                save_history(&history)?;
-                count += 1;
+                history.insert(filename);
+                uploaded_count += 1;
             }
-            Ok(None) => { /* Failed, do nothing (will retry next time) */ }
-            Err(e) => error!("Upload error for {}: {:?}", filename, e),
+            Ok((_, Ok(None))) => { /* Failed, do nothing */ }
+            Ok((filename, Err(e))) => error!("Upload error for {}: {:?}", filename, e),
+            Err(e) => error!("Task join error: {:?}", e),
         }
     }
 
-    if count > 0 {
-        info!("Done! Processed {} images.", count);
+    if uploaded_count > 0 {
+        if let Err(e) = save_history(&history) {
+            error!("Failed to save history: {:?}", e);
+        }
+    }
+
+    if !successful_asset_ids.is_empty() {
+        info!("Adding {} assets to album in batches...", successful_asset_ids.len());
+        for chunk in successful_asset_ids.chunks(50) {
+            if let Err(e) = add_to_album(&client, &base_url_arc, &api_key_arc, &album_id, chunk).await {
+                error!("Failed to link to album batch: {:?}", e);
+            }
+        }
+    }
+
+    if uploaded_count > 0 {
+        info!("Done! Processed {} images.", uploaded_count);
     } else {
         info!("No new screenshots found.");
     }
@@ -170,9 +210,9 @@ async fn get_album_id(client: &Client, base_url: &str, key: &str, name: &str) ->
     Ok(None)
 }
 
-async fn add_to_album(client: &Client, base_url: &str, key: &str, album_id: &str, asset_id: &str) -> Result<()> {
+async fn add_to_album(client: &Client, base_url: &str, key: &str, album_id: &str, asset_ids: &[String]) -> Result<()> {
     let url = format!("{}/api/albums/{}/assets", base_url, album_id);
-    let body = serde_json::json!({ "ids": [asset_id] });
+    let body = serde_json::json!({ "ids": asset_ids });
     
     client.put(&url)
         .header("x-api-key", key)
@@ -181,7 +221,7 @@ async fn add_to_album(client: &Client, base_url: &str, key: &str, album_id: &str
         .await?
         .error_for_status()?;
         
-    info!("   -- Added to album");
+    info!("   -- Added {} assets to album", asset_ids.len());
     Ok(())
 }
 
